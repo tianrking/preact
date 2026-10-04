@@ -1,0 +1,52 @@
+name: Isolated native formatter
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+defaults:
+  run:
+    shell: bash
+permissions:
+  contents: read
+jobs:
+  formatter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: true
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: helper
+      - run: '[[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]'
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: subject
+      - run: python ../helper/.github/engineer-native/snapshot.py before-install
+        working-directory: subject
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: 11.3.0
+          package_json_file: subject/package.json
+          run_install: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.22.2
+      - name: Native project formatter
+        working-directory: subject
+        run: |
+          pnpm install --frozen-lockfile
+          python ../helper/.github/engineer-native/snapshot.py before-format
+          pnpm exec oxfmt --write src/diff/props.js
+          git diff -- src/diff/props.js > ../evidence/formatter.patch
+          cp src/diff/props.js ../evidence/formatted-props.js
+          sha256sum src/diff/props.js > ../evidence/formatted-source-hash.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: formatter-${{ inputs.source_sha }}
+          path: evidence/
