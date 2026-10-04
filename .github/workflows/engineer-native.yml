@@ -1,0 +1,98 @@
+name: Isolated native evidence
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Immutable test source commit
+        required: true
+        type: string
+      mode:
+        description: Native validation scope
+        required: true
+        type: choice
+        options: [red, green]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CI: true
+      FLAKEY: false
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      MODE: ${{ inputs.mode }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: helper
+      - name: Validate immutable inputs
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$MODE" == red || "$MODE" == green ]]
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: subject
+      - name: Record source before native execution
+        working-directory: subject
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python ../helper/.github/engineer-native/snapshot.py before-install
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: 11.3.0
+          package_json_file: subject/package.json
+          run_install: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.22.2
+      - name: Frozen installation and native Chromium
+        working-directory: subject
+        run: pnpm install --frozen-lockfile
+      - name: Record actual native configuration
+        working-directory: subject
+        run: |
+          python ../helper/.github/engineer-native/snapshot.py before-build
+          node --input-type=module -e 'import config from "./vitest.config.mjs"; import fs from "node:fs"; fs.writeFileSync("../evidence/source-config.json", JSON.stringify({node:process.version,aliases:config.resolve.alias.map(x=>({find:String(x.find),replacement:x.replacement})),projects:config.test.projects.map(x=>x.test)},null,2));'
+          pnpm --version > ../evidence/pnpm-version.txt
+          pnpm exec playwright --version > ../evidence/playwright-version.txt
+      - name: Native package build
+        working-directory: subject
+        run: |
+          pnpm build 2>&1 | tee ../evidence/build.log
+          python ../helper/.github/engineer-native/snapshot.py after-build
+      - name: Native Chromium regression
+        working-directory: subject
+        run: |
+          python ../helper/.github/engineer-native/snapshot.py before-regression
+          set +e
+          MINIFY=false pnpm exec vitest run test/browser/events.test.jsx 2>&1 | tee ../evidence/regression.log
+          result=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$result" > ../evidence/regression-exit.txt
+          python ../helper/.github/engineer-native/snapshot.py after-regression
+          if [[ "$MODE" == red ]]; then
+            test "$result" -ne 0
+            grep -q 'shared handler' ../evidence/regression.log
+            grep -q 'frozen callbacks' ../evidence/regression.log
+            grep -q 'AssertionError' ../evidence/regression.log
+          else
+            test "$result" -eq 0
+          fi
+      - name: Project lint, formatting, source and minified full tests
+        if: inputs.mode == 'green'
+        working-directory: subject
+        run: |
+          pnpm lint 2>&1 | tee ../evidence/lint.log
+          pnpm format:check 2>&1 | tee ../evidence/format.log
+          MINIFY=false COVERAGE=true pnpm exec vitest run 2>&1 | tee ../evidence/source-full.log
+          MINIFY=true node --input-type=module -e 'import config from "./vitest.config.mjs"; import fs from "node:fs"; fs.writeFileSync("../evidence/minified-config.json", JSON.stringify(config.resolve.alias.map(x=>({find:String(x.find),replacement:x.replacement})),null,2));'
+          COVERAGE=true pnpm test:unit 2>&1 | tee ../evidence/minified-and-types.log
+          python ../helper/.github/engineer-native/snapshot.py after-full
+      - name: Preserve native evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-${{ inputs.mode }}-${{ inputs.source_sha }}
+          path: evidence/
