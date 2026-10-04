@@ -8,6 +8,11 @@ on:
       fixed_sha:
         required: true
         type: string
+      scope:
+        required: true
+        type: choice
+        options: [tables, todo]
+        default: tables
 defaults:
   run:
     shell: bash
@@ -59,6 +64,8 @@ jobs:
           name: package-${{ matrix.version }}
           path: evidence/
   benchmark:
+    env:
+      BENCH_SCOPE: ${{ inputs.scope }}
     needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -96,8 +103,12 @@ jobs:
         working-directory: benchmarks
         run: |
           export CHROMEDRIVER_FILEPATH=$(which chromedriver)
-          pnpm run bench apps/table-app/create10k.html -d preact@local-pinned -d preact@main --trace=false 2>&1 | tee ../evidence/create10k.log
-          pnpm run bench apps/table-app/replace1k.html -d preact@local-pinned -d preact@main --trace=false 2>&1 | tee ../evidence/replace1k.log
+          if [[ "$BENCH_SCOPE" == tables ]]; then
+            pnpm run bench apps/table-app/create10k.html -d preact@local-pinned -d preact@main --trace=false 2>&1 | tee ../evidence/create10k.log
+            pnpm run bench apps/table-app/replace1k.html -d preact@local-pinned -d preact@main --trace=false 2>&1 | tee ../evidence/replace1k.log
+          else
+            pnpm run bench apps/todo/todo.html -i preact -d preact@local-pinned -d preact@main --trace=false 2>&1 | tee ../evidence/todo.log
+          fi
           sha256sum dependencies/preact/main/node_modules/preact/dist/preact.mjs dependencies/preact/local-pinned/node_modules/preact/dist/preact.mjs > ../evidence/actual-import-hashes-after.txt
           diff ../evidence/actual-import-hashes-before.txt ../evidence/actual-import-hashes-after.txt
           git status --short > ../evidence/benchmark-status-after.txt
