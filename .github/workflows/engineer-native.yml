@@ -11,6 +11,9 @@ on:
         required: true
         type: choice
         options: [red, green]
+defaults:
+  run:
+    shell: bash
 permissions:
   contents: read
 jobs:
