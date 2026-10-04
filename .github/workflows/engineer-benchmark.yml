@@ -1,0 +1,107 @@
+name: Isolated native benchmarks
+on:
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        required: true
+        type: string
+      fixed_sha:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        version: [base, fixed]
+      fail-fast: false
+    env:
+      CI: true
+      SOURCE_SHA: ${{ matrix.version == 'base' && inputs.base_sha || inputs.fixed_sha }}
+      VERSION: ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: helper
+      - run: '[[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]'
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ matrix.version == 'base' && inputs.base_sha || inputs.fixed_sha }}
+          path: subject
+      - run: python ../helper/.github/engineer-native/snapshot.py before-install
+        working-directory: subject
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: 11.3.0
+          package_json_file: subject/package.json
+          run_install: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.22.2
+      - name: Build immutable benchmark package
+        working-directory: subject
+        run: |
+          pnpm install --frozen-lockfile 2>&1 | tee ../evidence/install.log
+          python ../helper/.github/engineer-native/snapshot.py before-build
+          pnpm build 2>&1 | tee ../evidence/build.log
+          pnpm pack --out "../evidence/$VERSION.tgz"
+          python ../helper/.github/engineer-native/snapshot.py after-package
+          sha256sum dist/preact.mjs "../evidence/$VERSION.tgz" > ../evidence/package-hashes.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: package-${{ matrix.version }}
+          path: evidence/
+  benchmark:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: preactjs/benchmarks
+          ref: 0e3f96775fc12229ee91761b15547aa7b297393c
+          path: benchmarks
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: package-*
+          path: packages
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093
+        with:
+          version: 8.15.9
+          package_json_file: benchmarks/package.json
+          run_install: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22.22.2
+      - name: Install independent benchmark workspace as upstream workflow
+        working-directory: benchmarks
+        run: |
+          mkdir -p ../evidence
+          git rev-parse HEAD > ../evidence/benchmark-source.txt
+          sha256sum pnpm-lock.yaml > ../evidence/benchmark-lock-before.txt
+          cp ../packages/package-base/base.tgz dependencies/preact/main/preact-main.tgz
+          cp ../packages/package-fixed/fixed.tgz dependencies/preact/local-pinned/preact-local-pinned.tgz
+          export CHROMEDRIVER_FILEPATH=$(which chromedriver)
+          pnpm install 2>&1 | tee ../evidence/benchmark-install.log
+          pnpm install --no-frozen-lockfile --filter ./dependencies 2>&1 | tee ../evidence/benchmark-local-install.log
+          sha256sum dependencies/preact/main/node_modules/preact/dist/preact.mjs dependencies/preact/local-pinned/node_modules/preact/dist/preact.mjs > ../evidence/actual-import-hashes-before.txt
+      - name: Native Chrome table listener creation and replacement
+        working-directory: benchmarks
+        run: |
+          export CHROMEDRIVER_FILEPATH=$(which chromedriver)
+          pnpm run bench apps/table-app/create10k.html -d preact@local-pinned -d preact@main --trace=false 2>&1 | tee ../evidence/create10k.log
+          pnpm run bench apps/table-app/replace1k.html -d preact@local-pinned -d preact@main --trace=false 2>&1 | tee ../evidence/replace1k.log
+          sha256sum dependencies/preact/main/node_modules/preact/dist/preact.mjs dependencies/preact/local-pinned/node_modules/preact/dist/preact.mjs > ../evidence/actual-import-hashes-after.txt
+          diff ../evidence/actual-import-hashes-before.txt ../evidence/actual-import-hashes-after.txt
+          git status --short > ../evidence/benchmark-status-after.txt
+          sha256sum pnpm-lock.yaml > ../evidence/benchmark-lock-after.txt
+          cp -R out ../evidence/benchmark-out
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: benchmark-results
+          path: evidence/
